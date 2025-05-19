@@ -1,6 +1,7 @@
 import mysql.connector
 from mysql.connector import Error
 from datetime import datetime
+import json
 
 
 class AuthManager:
@@ -61,13 +62,34 @@ class AuthManager:
             if 'conn' in locals() and conn.is_connected():
                 conn.close()
 
-    def load_users(self):
-        # implementation to load users
-        pass
+    def archive_user(self, username):
+        """Archive a user instead of deleting"""
+        try:
+            conn = mysql.connector.connect(**self.db_config)
+            cursor = conn.cursor()
 
-    def save_users(self):
-        # implementation to save users
-        pass
+            # Move user to archived status
+            cursor.execute("""
+                UPDATE users 
+                SET status = 'archived' 
+                WHERE username = %s
+            """, (username,))
+            
+            conn.commit()
+            success = cursor.rowcount > 0
+
+            if success:
+                self.load_users()  # Reload active users list
+            return success
+
+        except Error as e:
+            print(f"Error archiving user: {e}")
+            return False
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+            if 'conn' in locals() and conn.is_connected():
+                conn.close()
 
     def _initialize_system(self):
         """Initialize the complete database system"""
@@ -79,147 +101,24 @@ class AuthManager:
             cursor.execute("CREATE DATABASE IF NOT EXISTS dental_clinic_system")
             cursor.execute("USE dental_clinic_system")
 
-            # Create users table
+            # Update users table to include status
             cursor.execute("""
-                           CREATE TABLE IF NOT EXISTS users
-                           (
-                               id
-                               INT
-                               AUTO_INCREMENT
-                               PRIMARY
-                               KEY,
-                               username
-                               VARCHAR
-                           (
-                               255
-                           ) NOT NULL UNIQUE,
-                               password VARCHAR
-                           (
-                               255
-                           ) NOT NULL,
-                               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                               ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                           """)
+                CREATE TABLE IF NOT EXISTS users (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    username VARCHAR(255) NOT NULL UNIQUE,
+                    password VARCHAR(255) NOT NULL,
+                    status VARCHAR(20) DEFAULT 'active',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """)
 
-            # Create appointments table
-            cursor.execute("""
-                           CREATE TABLE IF NOT EXISTS appointments
-                           (
-                               id
-                               INT
-                               AUTO_INCREMENT
-                               PRIMARY
-                               KEY,
-                               user_id
-                               INT,
-                               first_name
-                               VARCHAR
-                           (
-                               255
-                           ) NOT NULL,
-                               last_name VARCHAR
-                           (
-                               255
-                           ) NOT NULL,
-                               dob DATE,
-                               gender VARCHAR
-                           (
-                               50
-                           ),
-                               contact VARCHAR
-                           (
-                               255
-                           ),
-                               email VARCHAR
-                           (
-                               255
-                           ),
-                               appointment_date DATE NOT NULL,
-                               preferred_time VARCHAR
-                           (
-                               255
-                           ),
-                               preferred_doctor VARCHAR
-                           (
-                               255
-                           ),
-                               address TEXT,
-                               status VARCHAR
-                           (
-                               50
-                           ) DEFAULT 'pending',
-                               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                               FOREIGN KEY
-                           (
-                               user_id
-                           ) REFERENCES users
-                           (
-                               id
-                           ) ON DELETE CASCADE
-                               ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                           """)
-
-            # Create services table
-            cursor.execute("""
-                           CREATE TABLE IF NOT EXISTS services
-                           (
-                               id
-                               INT
-                               AUTO_INCREMENT
-                               PRIMARY
-                               KEY,
-                               appointment_id
-                               INT,
-                               service_name
-                               VARCHAR
-                           (
-                               255
-                           ),
-                               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                               FOREIGN KEY
-                           (
-                               appointment_id
-                           ) REFERENCES appointments
-                           (
-                               id
-                           ) ON DELETE CASCADE
-                               ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                           """)
-
-            # Create receipts table
-            cursor.execute("""
-                           CREATE TABLE IF NOT EXISTS receipts
-                           (
-                               id
-                               INT
-                               AUTO_INCREMENT
-                               PRIMARY
-                               KEY,
-                               user_id
-                               INT,
-                               receipt_text
-                               TEXT,
-                               amount
-                               DECIMAL
-                           (
-                               10,
-                               2
-                           ),
-                               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                               FOREIGN KEY
-                           (
-                               user_id
-                           ) REFERENCES users
-                           (
-                               id
-                           ) ON DELETE CASCADE
-                               ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                           """)
+            # Update existing users to have status if not set
+            try:
+                cursor.execute("UPDATE users SET status = 'active' WHERE status IS NULL")
+            except Error:
+                pass
 
             conn.commit()
-            print("Database system initialized successfully")
-
-            # Update config to include database
             self.db_config['database'] = 'dental_clinic_system'
 
         except Error as e:
@@ -230,15 +129,34 @@ class AuthManager:
             if 'conn' in locals() and conn.is_connected():
                 conn.close()
 
-    def load_users(self):
-        """Load all users from the database"""
+    def get_archived_users(self):
+        """Get list of archived users"""
         try:
             conn = mysql.connector.connect(**self.db_config)
-            cursor = conn.cursor(dictionary=True)
+            cursor = conn.cursor()
 
-            cursor.execute("SELECT username FROM users")
+            cursor.execute("SELECT username FROM users WHERE status = 'archived'")
             users = cursor.fetchall()
-            self.users = [user['username'] for user in users]
+            return [user[0] for user in users]
+
+        except Error as e:
+            print(f"Error getting archived users: {e}")
+            return []
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+            if 'conn' in locals() and conn.is_connected():
+                conn.close()
+
+    def load_users(self):
+        """Load only active users"""
+        try:
+            conn = mysql.connector.connect(**self.db_config)
+            cursor = conn.cursor()
+
+            cursor.execute("SELECT username FROM users WHERE status = 'active'")
+            users = cursor.fetchall()
+            self.users = [user[0] for user in users]
             return True
 
         except Error as e:
@@ -428,28 +346,49 @@ Thank you for choosing AMPƎW DENTAL CLINIC!
         return receipt
 
     def get_user_appointments(self, username):
-        """Get all appointments for a user"""
+        """Get appointments for specific user from database"""
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor(dictionary=True)
 
+            # Get user's appointments with complete details
             query = """
-                    SELECT a.*, GROUP_CONCAT(s.service_name) as services
-                    FROM appointments a
-                             LEFT JOIN services s ON a.id = s.appointment_id
-                             JOIN users u ON a.user_id = u.id
-                    WHERE u.username = %s
-                    GROUP BY a.id
-                    ORDER BY a.appointment_date DESC \
-                    """
+                SELECT 
+                    a.*,
+                    GROUP_CONCAT(s.service_name) as services,
+                    u.username,
+                    CONCAT(a.first_name, ' ', a.last_name) as patient_name,
+                    a.email,
+                    a.contact,
+                    a.gender,
+                    a.dob as date_of_birth,
+                    a.address,
+                    a.appointment_date,
+                    a.preferred_time,
+                    a.preferred_doctor,
+                    a.status,
+                    a.created_at
+                FROM appointments a
+                LEFT JOIN services s ON a.id = s.appointment_id
+                JOIN users u ON a.user_id = u.id
+                WHERE u.username = %s
+                GROUP BY a.id
+                ORDER BY a.appointment_date DESC, a.created_at DESC
+            """
             cursor.execute(query, (username,))
             appointments = cursor.fetchall()
 
-            for appointment in appointments:
-                if appointment['services']:
-                    appointment['services'] = appointment['services'].split(',')
+            # Process results
+            for appt in appointments:
+                if appt['services']:
+                    appt['services'] = appt['services'].split(',')
                 else:
-                    appointment['services'] = []
+                    appt['services'] = []
+                    
+                # Convert date objects to string format
+                for date_field in ['appointment_date', 'date_of_birth', 'created_at']:
+                    if appt.get(date_field):
+                        appt[date_field] = appt[date_field].strftime('%Y-%m-%d')
 
             return appointments
 
@@ -546,3 +485,11 @@ Thank you for choosing AMPƎW DENTAL CLINIC!
                 cursor.close()
             if 'conn' in locals() and conn.is_connected():
                 conn.close()
+
+    def save_appointment(self, appointment_data):
+        """Save appointment data to database"""
+        try:
+            return self.add_user_appointment(self.current_user, appointment_data)
+        except Exception as e:
+            print(f"Error saving appointment: {e}")
+            return False
